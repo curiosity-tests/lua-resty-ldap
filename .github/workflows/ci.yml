@@ -3,9 +3,9 @@ run-name: "CI ${{ inputs.leg || github.event_name }} ${{ inputs.racecar_run }}"
 
 on:
   push:
-    branches: [ main ]
+    branches: [main]
   pull_request:
-    branches: [ main ]
+    branches: [main]
 
 
   workflow_dispatch:
@@ -36,54 +36,126 @@ jobs:
       OPENRESTY_PREFIX: "/usr/local/openresty"
 
     steps:
-      - uses: crashappsec/action-checkout@main
-        with:
-          chalk: ${{ env.CHALK_ON }}
-          profile: ${{ inputs.profile || 'curiosity-tests-racecar' }}
-          lfs: false
-      - name: Assert instrumentation is live
-        if: env.CHALK_ON == 'true'
-        continue-on-error: true
-        run: |
-          test -n "${CURIOSITY_ROOT:-}" || { echo "::warning::CURIOSITY_ROOT unset in this step - in a container job the observables install on the host"; exit 1; }
-      - name: get dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get -y install --no-install-recommends wget curl gnupg ca-certificates lsb-release cpanminus
+    - uses: crashappsec/action-checkout@main
+      with:
+        chalk: ${{ env.CHALK_ON }}
+        profile: ${{ inputs.profile || 'curiosity-tests-racecar' }}
+        lfs: false
+    - name: get dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get -y install --no-install-recommends wget curl gnupg ca-certificates lsb-release cpanminus
 
-          # openresty
-          sudo install -m 0755 -d /etc/apt/keyrings
-          wget -O - https://openresty.org/package/pubkey.gpg | sudo gpg --dearmor -o /etc/apt/keyrings/openresty.gpg
-          echo "deb [signed-by=/etc/apt/keyrings/openresty.gpg] http://openresty.org/package/ubuntu $(lsb_release -sc) main" | sudo tee /etc/apt/sources.list.d/openresty.list
-          sudo apt-get update
-          sudo apt-get -y install openresty
+        # openresty
+        sudo install -m 0755 -d /etc/apt/keyrings
+        wget -O - https://openresty.org/package/pubkey.gpg | sudo gpg --dearmor -o /etc/apt/keyrings/openresty.gpg
+        echo "deb [signed-by=/etc/apt/keyrings/openresty.gpg] http://openresty.org/package/ubuntu $(lsb_release -sc) main" | sudo tee /etc/apt/sources.list.d/openresty.list
+        sudo apt-get update
+        sudo apt-get -y install openresty
 
-          # Test::Nginx
-          sudo cpanm --notest Test::Nginx
+        # Test::Nginx
+        sudo cpanm --notest Test::Nginx
 
-          # luarocks
-          sudo apt -y install lua5.1 luarocks
-          luarocks make rockspec/lua-resty-ldap-local-0.rockspec --local --tree ./deps # install deps to local
+        # luarocks
+        sudo apt -y install lua5.1 luarocks
+        luarocks make rockspec/lua-resty-ldap-local-0.rockspec --local --tree ./deps # install deps to local
 
-      - name: script
-        run: |
-          sudo docker run --detach --rm --name openldap -p 1389:1389 -p 1636:1636 -v $PWD/t/certs:/opt/bitnami/openldap/certs -e LDAP_ENABLE_TLS=yes -e LDAP_TLS_CERT_FILE=/opt/bitnami/openldap/certs/localhost_slapd_cert.pem -e LDAP_TLS_KEY_FILE=/opt/bitnami/openldap/certs/localhost_slapd_key.pem -e LDAP_TLS_CA_FILE=/opt/bitnami/openldap/certs/mycacert.crt -e LDAP_ADMIN_USERNAME=admin -e LDAP_ADMIN_PASSWORD=adminpassword -e LDAP_USERS=user01,user02 -e LDAP_PASSWORDS=password1,password2 bitnamilegacy/openldap:2.6.10-debian-12-r4
-          ok=0
-          for _ in $(seq 1 60); do
-            if docker exec openldap ldapsearch -x -H ldap://127.0.0.1:1389 -D "cn=admin,dc=example,dc=org" -w adminpassword -b "dc=example,dc=org" -s base >/dev/null 2>&1; then
-              ok=$((ok+1))
-              if [ "$ok" -ge 3 ]; then break; fi
-            else
-              ok=0
-            fi
-            sleep 1
-          done
-          if [ "$ok" -lt 3 ]; then
-            echo "OpenLDAP did not become ready" >&2
-            docker logs openldap || true
-            exit 1
+    - name: script
+      run: |
+        sudo docker run --detach --rm --name openldap -p 1389:1389 -p 1636:1636 -v $PWD/t/certs:/opt/bitnami/openldap/certs -e LDAP_ENABLE_TLS=yes -e LDAP_TLS_CERT_FILE=/opt/bitnami/openldap/certs/localhost_slapd_cert.pem -e LDAP_TLS_KEY_FILE=/opt/bitnami/openldap/certs/localhost_slapd_key.pem -e LDAP_TLS_CA_FILE=/opt/bitnami/openldap/certs/mycacert.crt -e LDAP_ADMIN_USERNAME=admin -e LDAP_ADMIN_PASSWORD=adminpassword -e LDAP_USERS=user01,user02 -e LDAP_PASSWORDS=password1,password2 bitnamilegacy/openldap:2.6.10-debian-12-r4
+        ok=0
+        for _ in $(seq 1 60); do
+          if docker exec openldap ldapsearch -x -H ldap://127.0.0.1:1389 -D "cn=admin,dc=example,dc=org" -w adminpassword -b "dc=example,dc=org" -s base >/dev/null 2>&1; then
+            ok=$((ok+1))
+            if [ "$ok" -ge 3 ]; then break; fi
+          else
+            ok=0
           fi
-          docker cp t/fixtures/ad.ldif openldap:/tmp/ad.ldif
-          docker exec openldap ldapadd -x -H ldap://127.0.0.1:1389 -D "cn=admin,dc=example,dc=org" -w adminpassword -f /tmp/ad.ldif
-          export PATH=$OPENRESTY_PREFIX/nginx/sbin:$OPENRESTY_PREFIX/luajit/bin:$PATH
-          make test
+          sleep 1
+        done
+        if [ "$ok" -lt 3 ]; then
+          echo "OpenLDAP did not become ready" >&2
+          docker logs openldap || true
+          exit 1
+        fi
+        docker cp t/fixtures/ad.ldif openldap:/tmp/ad.ldif
+        docker exec openldap ldapadd -x -H ldap://127.0.0.1:1389 -D "cn=admin,dc=example,dc=org" -w adminpassword -f /tmp/ad.ldif
+        export PATH=$OPENRESTY_PREFIX/nginx/sbin:$OPENRESTY_PREFIX/luajit/bin:$PATH
+        make test
+    - name: Check observables and crashes
+      if: always() && env.CHALK_ON == 'true'
+      shell: bash
+      run: |
+        set -uo pipefail
+        root="${CURIOSITY_ROOT:-}"
+        home="${CURIOSITY_HOME:-/mnt/curiosity}"
+        obs="${home}/observables"
+        fail=0
+
+        echo "::group::curiosity layout"
+        echo "CURIOSITY_ROOT=${root:-<unset>}"
+        echo "CURIOSITY_HOME=${home}"
+        ls -la "${obs}" 2>/dev/null || echo "no observables dir at ${obs}"
+        echo "::endgroup::"
+
+        # Observables for THIS run+attempt. The prefix matters: a stale file from an
+        # earlier run on the same mount would otherwise pass.
+        prefix="${GITHUB_RUN_ID}_${GITHUB_RUN_ATTEMPT}"
+        shopt -s nullglob
+        mine=("${obs}/${prefix}"*)
+        if [ ${#mine[@]} -eq 0 ]; then
+          mine=("${obs}/${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-observables"*)
+        fi
+        if [ ${#mine[@]} -eq 0 ]; then
+          echo "::error::no observables for run ${prefix} in ${obs} - instrumentation produced nothing"
+          fail=1
+        else
+          echo "observables present: ${#mine[@]} file(s)"
+          printf '  %s\n' "${mine[@]}"
+        fi
+
+        for f in "${mine[@]}"; do
+          case "$f" in
+            *.jsonl|*.json|*.combined)
+              if ! jq --slurp "." "$f" > /dev/null 2>&1; then
+                echo "::error::observables do not parse: $f"
+                fail=1
+              fi
+              ;;
+          esac
+        done
+
+        # Crash thresholds copied from check-run: a few null frames are noise, more than
+        # five is a stack walk into nothing.
+        for f in "${root}"/log/co-host*.log "${home}"/log/co-host*.log; do
+          [ -f "$f" ] || continue
+          echo "Asserting that there is no crash in $f"
+          if [ "$(grep -c 'p 00000000' "$f" 2>/dev/null || echo 0)" -gt 5 ] \
+            || [ "$(grep -E -c 'FATAL: Uncaught signal|Address not mapped at|RAX 0x.*RBX 0x' "$f" 2>/dev/null || echo 0)" -gt 1 ]; then
+            echo "::error::crash signature in $f"
+            grep -E 'FATAL: Uncaught signal|Address not mapped at' "$f" | head -5 || true
+            fail=1
+          fi
+        done
+
+        cores=("${root}"/coredump.* "${home}"/coredump.*)
+        if [ ${#cores[@]} -gt 0 ]; then
+          echo "::error::coredump present: ${cores[*]}"
+          fail=1
+        fi
+
+        for f in "${root}"/runc.log "${root}"/runc.global.log \
+                 "${home}"/runc.log "${home}"/runc.global.log; do
+          [ -f "$f" ] || continue
+          if grep -q '^E:' "$f"; then
+            echo "::error::error in $f"
+            grep '^E:' "$f" | head -5
+            fail=1
+          fi
+        done
+
+        if [ "$fail" -ne 0 ]; then
+          echo "::error::instrumentation check FAILED"
+          exit 1
+        fi
+        echo "instrumentation check passed"
